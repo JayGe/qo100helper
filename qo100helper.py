@@ -84,9 +84,15 @@ class Ui_MainWindow(object):
     rxPort = 7356
     txHost = "localhost" # expecting 432.
     txPort = 4568
-    pulseDev = 3 # Audio sink in pulse to mute
-    pulse = pulsectl.Pulse('my-client-name')
+    soundcardName = 'HyperX Virtual Surround Sound Analogue Stereo' # Get sound card name from list with output from below script
 
+    #pulseDev = 1 	# Audio sink in pulse to mute, list devs with: 
+			# import pulsectl 
+			# pulse = pulsectl.Pulse('my-client-name') 
+			# for x in pulse.sink_list() :
+			#  print x 
+    pulse = pulsectl.Pulse('my-client-name')
+    pulseDev = 0
     rxFreq = 0
     txFreq = 0
     syncRxReq = 0
@@ -95,6 +101,11 @@ class Ui_MainWindow(object):
     syncTxFreq = 0
     offsetHz = 0
     pttSet = 0 # 0 = no change, 1 = request ptt on, 2 = request ptt off
+
+    for x in pulse.sink_list() :
+        if re.search(soundcardName, str(x)) :
+	    break
+        pulseDev = pulseDev+1;
 
     def setupUi(self, MainWindow):
         MainWindow.setObjectName("MainWindow")
