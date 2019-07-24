@@ -6,6 +6,7 @@ from PyQt5.QtWidgets import *
 from PyQt5.QtCore import *
 from socket import *
 
+import time
 import traceback, sys, re
 import pulsectl
 import signal, os
@@ -282,6 +283,7 @@ class Ui_MainWindow(object):
             connSock = socket(AF_INET, SOCK_STREAM)
             connSock.connect((self.rxHost, self.rxPort))
             while 1:
+                time.sleep(0.1)
                 if (self.syncRxReq):
                     #connSock.send('F %s' % self.rxFreq)
                     connSock.send('F %s' % self.syncRxFreq)
@@ -308,6 +310,7 @@ class Ui_MainWindow(object):
             connSock = socket(AF_INET, SOCK_STREAM)
             connSock.connect((self.txHost, self.txPort))
             while 1:
+                time.sleep(0.1)
                 if (self.syncTxReq):
                     #print ("TX Sync requested %s" % self.syncTxFreq)
                     connSock.send('F %s\n' % self.syncTxFreq)
