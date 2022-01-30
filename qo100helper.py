@@ -80,7 +80,18 @@ class Worker(QRunnable):
 
 class Ui_MainWindow(object):
 
-    txrxOffset = 10057500000 # Difference between rx & tx 
+    #txrxOffset = 10057500000 # Difference between rx & tx 
+    #txrxOffset = 10057500080 # Difference between rx & tx 
+    #txrxOffset = 10057500030 # Difference between rx & tx 
+    #txrxOffset = 10057500050 # Difference between rx & tx 
+    txrxOffset = 10057499700 # Difference between rx & tx 
+    #txrxOffset = 10057499950 # Difference between rx & tx 
+    #txrxOffset = 10057499930 # Difference between rx & tx 
+    #txrxOffset = 10057499900 # Difference between rx & tx 
+    #txrxOffset = 10057499990 # Difference between rx & tx 
+    #txrxOffset = 10057500950 # Difference between rx & tx  # RTL +650 Hz
+    #txrxOffset = 10057500250 # Difference between rx & tx  # RTL +650 Hz
+    #txrxOffset = 10057500700 # Difference between rx & tx  # RTL +650 Hz
     rxHost = "localhost" # expecting rx to be 10498
     rxPort = 7356
     txHost = "localhost" # expecting 432.
@@ -105,7 +116,7 @@ class Ui_MainWindow(object):
 
     for x in pulse.sink_list() :
         if re.search(soundcardName, str(x)) :
-	    break
+            break
         pulseDev = pulseDev+1;
 
     def setupUi(self, MainWindow):
@@ -268,12 +279,12 @@ class Ui_MainWindow(object):
                 
     def linkTx(self):
         if self.linkButton.isChecked():
-            #print "linking"
+            #print ("linking")
             self.syncTxButton.setEnabled(False)
             self.syncRxButton.setEnabled(False)
             self.linkButton.setStyleSheet("background-color: red; border-radius: 1px;")
         else:
-            #print "unlinking"
+            #print ("unlinking")
             self.syncTxButton.setEnabled(True)
             self.syncRxButton.setEnabled(True)
             self.linkButton.setStyleSheet("background-color: light grey;")
@@ -286,11 +297,13 @@ class Ui_MainWindow(object):
                 time.sleep(0.1)
                 if (self.syncRxReq):
                     #connSock.send('F %s' % self.rxFreq)
-                    connSock.send('F %s' % self.syncRxFreq)
+                    sendString = ('F %s' % self.syncRxFreq)
+                    connSock.send(sendString.encode())
+                    #connSock.send('F %s'.encode() % self.syncRxFreq)
                     self.syncRxReq = 0
                 else:
-                    connSock.send('f\n')
-                output = connSock.recv(100)
+                    connSock.send('f\n'.encode())
+                output = connSock.recv(100).decode()
                 if not ( re.match(r'^[0-9]+$', str(output)) ): # change to not that or RPRT0
                     #print ("Unexpected non frequency response from hamlib: " + str(output)) # not strictly true F does this
                     continue
@@ -304,7 +317,6 @@ class Ui_MainWindow(object):
         except:
             print ('Could not connect to Rx.')
             os._exit(1)
-
     def connTx(self): # ****** make sure turns PTT off when program exits? ********
         try:
             connSock = socket(AF_INET, SOCK_STREAM)
@@ -313,27 +325,31 @@ class Ui_MainWindow(object):
                 time.sleep(0.1)
                 if (self.syncTxReq):
                     #print ("TX Sync requested %s" % self.syncTxFreq)
-                    connSock.send('F %s\n' % self.syncTxFreq)
+                    sendString=('F %s\n' % self.syncTxFreq)
+                    connSock.send(sendString.encode())
                     self.syncTxReq = 0
                 elif (self.pttSet == 1):
                     #print ("PTT ON REQUESTED")
-                    connSock.send("T 1\n")
+                    connSock.send("T 1\n".encode())
+                    os.system("(/usr/bin/mosquitto_pub -h 192.168.0.201 -t '/radio/amp/set2' -m 'ON')")
                     self.pttSet = 0
                 elif (self.pttSet == 2):
                     #print ("PTT OFF REQUESTED")
-                    connSock.send('T 0\n') 
+                    connSock.send('T 0\n'.encode())
+                    os.system("(/usr/bin/mosquitto_pub -h 192.168.0.201 -t '/radio/amp/set2' -m 'OFF')")
                     self.pttSet = 0
                 elif (self.linkButton.isChecked()): 
                     newTx = int(self.rxFreq) - self.txrxOffset
                     if (int(self.txFreq) != newTx):
                         #print ("Not equal, sync %d to %d" %(int(self.txFreq), newTx))
-                        connSock.send('F %s\n' % newTx)
+                        sendString = ('F %s\n'% newTx)
+                        connSock.send(sendString.encode())
                         self.txFreq = str(newTx)
                     else:
-                        connSock.send('f\n')
+                        connSock.send('f\n'.encode())
                 else:
-                    connSock.send('f\n')
-                output = connSock.recv(100)
+                    connSock.send('f\n'.encode())
+                output = connSock.recv(100).decode()
                 
                 if not ( re.match(r'^[0-9]+$', str(output)) ):
                     #print ("Unexpected non frequency response from hamlib: " + str(output))
