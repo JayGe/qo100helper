@@ -81,10 +81,12 @@ class Worker(QRunnable):
 class Ui_MainWindow(object):
 
     #txrxOffset = 10057500000 # Difference between rx & tx 
+    txrxOffsetFixed = 10057500000 # Difference between rx & tx 
+    txrxOffset = txrxOffsetFixed
     #txrxOffset = 10057500080 # Difference between rx & tx 
     #txrxOffset = 10057500030 # Difference between rx & tx 
     #txrxOffset = 10057500050 # Difference between rx & tx 
-    txrxOffset = 10057499700 # Difference between rx & tx 
+    #txrxOffset = 10057499700 # Difference between rx & tx 
     #txrxOffset = 10057499950 # Difference between rx & tx 
     #txrxOffset = 10057499930 # Difference between rx & tx 
     #txrxOffset = 10057499900 # Difference between rx & tx 
@@ -227,7 +229,7 @@ class Ui_MainWindow(object):
     def retranslateUi(self, MainWindow):
         _translate = QCoreApplication.translate
         MainWindow.setWindowTitle(_translate("MainWindow", "QO-100 Hamlib Helper"))
-        self.offsetLbl1.setText(_translate("MainWindow", "RX Offset"))
+        self.offsetLbl1.setText(_translate("MainWindow", "TX Offset"))
         self.txLabel.setText(_translate("MainWindow", "  Transmit 2400."))
         self.rxLabel.setText(_translate("MainWindow", " Receive 10498."))
         self.offsetLbl2.setText(_translate("MainWindow", "0"))
@@ -309,6 +311,7 @@ class Ui_MainWindow(object):
                     continue
                 self.rxFreq = str(output)
                 #print ('RX Frequency offset: %d read: %d real: %d' % (self.offsetHz, int(self.rxFreq), (int(self.rxFreq) + self.offsetHz)))
+                #print ('TXRX Offset:%d With Adjust: %d' % (self.txrxOffset, int(self.txrxOffset - self.offsetHz)) )
                 shortF=self.rxFreq[5:] # strip leading three, 10368 here
                 self.lcdRx.display(shortF[:3] + "." + shortF[3:]) # display xxx.xxx
                 #print shortF[:3] + "." + shortF[3:]
@@ -323,6 +326,8 @@ class Ui_MainWindow(object):
             connSock.connect((self.txHost, self.txPort))
             while 1:
                 time.sleep(0.1)
+                if ((self.txrxOffsetFixed - self.offsetHz) != self.txrxOffset): # Adjust TX offset if changed in GUI
+                    self.txrxOffset = self.txrxOffsetFixed  - self.offsetHz
                 if (self.syncTxReq):
                     #print ("TX Sync requested %s" % self.syncTxFreq)
                     sendString=('F %s\n' % self.syncTxFreq)
