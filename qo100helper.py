@@ -134,23 +134,29 @@ class Ui_MainWindow(object):
     calPlaceHz = 1500          # park the beacon here in the USB audio passband.
                                # USB audio = RF - dial, so the dial goes BELOW it
     calSeconds = 8.0           # capture length; the beacon idents, so give it time
-    calMinSep = 40.0           # a rival this close is keying sideband, not a rival
-    calRivalRatio = 0.4        # a rival this strong means "do not guess"
+    calMinSep = 40.0           # a second peak this close is keying sideband, not a
+                               # separate signal (the beacon's FSK shift is ~397 Hz,
+                               # far outside the search, so this only sees sidebands
+                               # or a near-by QSO)
+    calRivalRatio = 0.4        # a genuine second carrier this strong means "do not
+                               # guess": picking between two real signals is a coin
+                               # toss, so refuse
     calKeyFrame = 0.2          # detection frame: >= one Morse element so a keyed
     calKeyHop = 0.05           # carrier appears undiluted in at least one frame
     calRefineHz = 25.0         # +/- Hz around the detected carrier for fine tuning
     calSettle = 0.8            # let gqrx re-lock before capturing / restoring
     calFs = 48000              # capture rate
     calDecim = 6               # 48k -> 8k, keeps the 1.5k tone well inside Nyquist
-    calSearch = 250            # +/- Hz searched around calPlaceHz. Covers the
-                               # operator's stated drift ("a couple of hundred Hz")
-                               # and is deliberately SMALLER than the 390 Hz
-                               # spacing to a persistent carrier measured below the
-                               # beacon: at 400 that rival sat inside the band and
-                               # CAL correctly refused every run as ambiguous. If
-                               # CAL ever reports two carriers, do not widen this
-                               # past the rival - re-baseline on a cleaner carrier.
-                               # Tone stays in gqrx's 100-3500 Hz passband.
+    calSearch = 250            # +/- Hz searched around calPlaceHz. The beacon is
+                               # FSK Morse: its ident shifts between two tones
+                               # ~397 Hz apart, so the search must stay smaller
+                               # than that shift to see exactly one tone. At 400
+                               # both tones fell inside the band and CAL refused
+                               # every run as ambiguous - it mistook the beacon's
+                               # own mark and space for two rival carriers. If CAL
+                               # ever reports two carriers, do not widen this
+                               # toward the FSK shift; the other tone is the same
+                               # beacon. Tone stays in gqrx's 100-3500 Hz passband.
     calMinSnr = 15.0           # peak / band-noise-median. Measured with margin: the
                                # real beacon gives 94-220x even while keyed, whereas
                                # a false lock on a stray digimode carrier measured
@@ -484,15 +490,17 @@ class Ui_MainWindow(object):
         return a
 
     def toneEstimate(self, samples):
-        # Two stages, because the NB beacon is CW-keyed and a single transform
-        # cannot both find it and measure it:
+        # Two stages, because the NB beacon is FSK Morse (its ident shifts between
+        # two tones ~397 Hz apart) and a single transform cannot both find it and
+        # measure it:
         #
         # 1. DETECT on short frames (>= one Morse element), taking the per-bin
-        #    MAXIMUM across them. A DFT peak scales with the carrier's duty cycle
-        #    *inside the window*, so one long FFT showed the beacon at ~50% of its
-        #    true level and a steady rival 397 Hz below it won the search - the
-        #    real 2026-11-25 wrong answer. Short frames catch a key-on element at
-        #    full amplitude, so carriers are compared on true strength.
+        #    MAXIMUM across them. A DFT peak scales with a tone's duty cycle
+        #    *inside the window*, so one long FFT showed the keyed tone at ~50% of
+        #    its true level and the beacon's own other FSK tone 397 Hz away won the
+        #    search - the real 2026-11-25 wrong answer. Short frames catch a
+        #    key-on element at full amplitude, so tones are compared on true
+        #    strength.
         # 2. MEASURE with one long zero-padded FFT, but only in a narrow window
         #    around the carrier stage 1 picked, using log-parabolic interpolation.
         #    Short frames alone give only 5 Hz resolution.
@@ -532,9 +540,11 @@ class Ui_MainWindow(object):
         # area, and every peak looks like a rival. Say "not found", not "ambiguous".
         if snr < self.calMinSnr:
             return coarsef, peak, snr
-        # Ambiguity guard, judged on the keying-robust pooled spectrum: a second
-        # carrier of comparable strength elsewhere in the band makes picking the
-        # strongest a coin toss. Refuse instead of guessing.
+        # Ambiguity guard, judged on the keying-robust pooled spectrum. The search
+        # band is narrower than the beacon's ~397 Hz FSK shift, so its other tone
+        # never lands in here; a second comparable peak therefore means a genuine
+        # nearby signal (or a sideband), and picking between two real carriers is
+        # a coin toss. Refuse instead of guessing.
         rivals = [j for j in band if abs(float(fr[j]) - coarsef) > self.calMinSep
                   and float(pool[j]) > self.calRivalRatio * peak]
         if rivals:
