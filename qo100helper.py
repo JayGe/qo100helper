@@ -84,20 +84,14 @@ class Ui_MainWindow(object):
     # The nominal TX<->RX offset is arithmetic, not a tuning knob: the NB
     # transponder shifts down by exactly 8089.5 MHz and the up-converter adds
     # exactly 1968.000 MHz (operator-confirmed), so an uplink at 432.xxx MHz IF
-    # pairs with a downlink at IF + 10057.5 MHz. Nothing measured ever gets added
-    # in here - receive-chain error belongs in autoOffsetHz, which CAL derives
-    # from the beacon, and a manual trim belongs in offsetHz. This line is the
-    # band plan and nothing else.
-    #
-    # This used to hold 10057499900 plus a dozen commented-out alternatives from
-    # hand alignments (one annotated "RTL +650 Hz", which agrees with CAL's own
-    # 2026-11-25 measurement of the beacon to within 5 Hz). Those debugging values
-    # are gone: they were three different people's fudges stacked on top of each
-    # other, and a correction hidden in a constant is invisible to CAL forever.
+    # pairs with a downlink at IF + 10057.5 MHz. txrxOffsetBase is that plus the
+    # receive-chain error measured at the last re-baseline - it is the slider's
+    # zero point. The slider (offsetHz) is the single visible correction on top
+    # of it; there is no other hidden term.
     txrxOffsetNominal = 10057500000
-    txrxOffsetFixed = txrxOffsetNominal
+    txrxOffsetBase = txrxOffsetNominal
 
-    txrxOffset = txrxOffsetFixed
+    txrxOffset = txrxOffsetBase
     rxHost = "localhost" # expecting rx to be 10498
     rxPort = 7357 # gqrx
     txHost = "localhost" # expecting 432.
@@ -122,27 +116,21 @@ class Ui_MainWindow(object):
 
     # ---- Receive-only calibration against the QO-100 NB CW beacon -------
     # CAL measures where the LNB / IF / SDR chain actually puts the narrowband CW
-    # beacon NOW, and reports that position's error against the beacon's
-    # PUBLISHED frequency. The correction is therefore absolute: it finds an
-    # alignment error that was already there, instead of only the motion since
-    # some earlier hand-tuned moment. The previous differential baseline inherited
-    # that moment's error permanently, which is why CAL reported +12 Hz while the
-    # receiver was actually 645 Hz out and the operator was trimming -300 by hand.
-    # The receiver is the only part that wanders; the transmitter is frequency
-    # locked. Nothing here ever touches PTT, the transmitter or the amp.
-    beaconTrueHz = 10489500000   # published position of the NB CW beacon: the
-                                 # AMSAT-DL bandplan puts the CW segment from
-                                 # 10489.500 MHz. Beacon and our QRG share the same
-                                 # transponder and the same LNB and sit ~94 kHz
-                                 # apart, so their errors are common mode to a few
-                                 # Hz - anchoring on the beacon is anchoring on our
-                                 # own passband position.
-    beaconGuessHz = 10489500645  # where CAL last found the beacon, in this
-                                 # receiver's own terms. Used only to centre the
-                                 # search window and to bound a jump; it can never
-                                 # set the correction. Measured 2026-11-25 at
-                                 # +645.3 Hz from published, SNR 17x. cal.conf
-                                 # overwrites this on every CAL.
+    # beacon NOW, and corrects only the CHANGE in that position since the last
+    # re-baseline (drift). It never claims to know the beacon's absolute
+    # frequency, so no unverified LO or band-plan number can pull the TX. The
+    # beacon is a valid reference because it and the operator's QRG share one
+    # transponder and one LNB only ~94 kHz apart, so their errors are common mode
+    # to a few Hz. The receiver is the only part that wanders; the transmitter is
+    # frequency locked. Nothing here ever touches PTT, the transmitter or the amp.
+    beaconTrueHz = 10489500000   # published NB CW beacon (AMSAT-DL bandplan,
+                                 # 10489.500 MHz). Used only as the fallback
+                                 # search centre before the first baseline.
+    beaconBaseHz = 0             # the beacon's apparent position at the last
+                                 # re-baseline, in this receiver's own terms.
+                                 # 0 means "never baselined": the next CAL anchors
+                                 # here and folds the current slider into
+                                 # txrxOffsetBase so the slider reads 0 again.
     calPlaceHz = 1500          # park the beacon here in the USB audio passband.
                                # USB audio = RF - dial, so the dial goes BELOW it
     calSeconds = 8.0           # capture length; the beacon idents, so give it time
@@ -177,10 +165,7 @@ class Ui_MainWindow(object):
     # by the operator as exactly 1968.000 MHz, NB transponder shift 8089.5 MHz.
     gridHz = 10                # the slider cannot express anything finer and a
                                # drifting 9.75 GHz local oscillator is not a 1 Hz
-                               # quantity, so CAL's result lands on this grid too
-                               # and the two can never disagree in single Hz.
-    autoOffsetHz = 0           # whole measured receive-chain error, absolute, on
-                               # gridHz; added to nominal by desiredOffset()
+                               # quantity, so CAL's result lands on this grid too.
     txMinHz = 432050000        # IC-9700 IF limits for the NB uplink (432 MHz IF
     txMaxHz = 432300000        # + 1968 MHz up-converter = 2400.050-2400.300 MHz)
     txRefuseShown = -1         # last off-band target already reported, to not spam
@@ -252,8 +237,8 @@ class Ui_MainWindow(object):
         self.muteButton.clicked.connect(self.setMute) # Added
         self.offsetSlider = QSlider(self.centralWidget)
         self.offsetSlider.setGeometry(QRect(10, 210, 311, 18))
-        self.offsetSlider.setMinimum(-500)
-        self.offsetSlider.setMaximum(500)
+        self.offsetSlider.setMinimum(-1000)
+        self.offsetSlider.setMaximum(1000)
         self.offsetSlider.setSingleStep(10)
         self.offsetSlider.setOrientation(Qt.Horizontal)
         self.offsetSlider.setTickPosition(QSlider.TicksBelow)
@@ -332,7 +317,7 @@ class Ui_MainWindow(object):
 
         self.loadCalConf()      # pick up the last CAL before the rigs start talking
         self.txrxOffset = self.desiredOffset()
-        self.updateAutoLabel()
+        self.updateBaseLabel()
 
         rxWorker = Worker(self.connRx)
         self.threadpool.start(rxWorker)
@@ -357,7 +342,7 @@ class Ui_MainWindow(object):
         self.pttButton.setText(_translate("MainWindow", "PTT"))
         self.offsetLbl3.setText(_translate("MainWindow", "Hz"))
         self.calButton.setText(_translate("MainWindow", self.calText))
-        self.autoLbl.setText("auto 0 Hz")
+        self.autoLbl.setText("base 0 Hz")
 
     def setMute(self): # Added
         if self.pttButton.isChecked():
@@ -402,11 +387,11 @@ class Ui_MainWindow(object):
         return v if hz >= 0 else -v
 
     def desiredOffset(self):
-        return int(self.txrxOffsetFixed) + int(self.autoOffsetHz) - int(self.offsetHz)
+        return int(self.txrxOffsetBase) + int(self.offsetHz)
 
-    def updateAutoLabel(self):
+    def updateBaseLabel(self):
         try:
-            self.autoLbl.setText("auto %+d Hz" % self.autoOffsetHz)
+            self.autoLbl.setText("base %+d Hz" % (int(self.txrxOffsetBase) - self.txrxOffsetNominal))
         except:
             pass
 
@@ -418,30 +403,35 @@ class Ui_MainWindow(object):
         except (IOError, OSError):
             return  # no calibration saved yet, that's fine
         # A broken calibration file must not be mistaken for "no calibration
-        # saved yet". Defaulting to auto 0 in silence leaves the transmitter
-        # several hundred Hz out while everything on screen still looks normal -
-        # exactly the failure the -100 Hz constant used to hide.
+        # saved yet". Defaulting to base=nominal and offset=0 in silence leaves
+        # the transmitter several hundred Hz out while everything on screen
+        # still looks normal.
         loaded = False
         try:
-            m = re.search(r'autoOffsetHz\s*=\s*(-?\d+)', txt)
+            m = re.search(r'txrxOffsetBase\s*=\s*(-?\d+)', txt)
             if m:
-                self.autoOffsetHz = self.onGrid(m.group(1))
+                self.txrxOffsetBase = int(m.group(1))
                 loaded = True
-            m = re.search(r'beaconGuessHz\s*=\s*(-?\d+)', txt)
+            m = re.search(r'beaconBaseHz\s*=\s*(-?\d+)', txt)
             if m:
-                self.beaconGuessHz = int(m.group(1))
+                self.beaconBaseHz = int(m.group(1))
+            m = re.search(r'offsetHz\s*=\s*(-?\d+)', txt)
+            if m:
+                self.offsetHz = self.onGrid(m.group(1))
             m = re.search(r'driftHz\s*=\s*(-?\d+)', txt)
             if m:
                 self.calLastDrift = int(m.group(1))
         except Exception as msg:
-            print ("Could not parse %s: %s - running with auto %+d Hz, press CAL to re-measure" % (self.calConfPath, msg, self.autoOffsetHz))
+            print ("Could not parse %s: %s - running with base %+d Hz, offset %+d Hz. Press CAL to re-measure" % (self.calConfPath, msg, self.txrxOffsetBase - self.txrxOffsetNominal, self.offsetHz))
             return
         if not loaded:
             # The file exists but holds no usable number - say so rather than
             # announcing a loaded calibration of 0 Hz.
-            print ("%s holds no usable autoOffsetHz - running with auto %+d Hz, press CAL to re-measure" % (self.calConfPath, self.autoOffsetHz))
+            print ("%s holds no usable txrxOffsetBase - running with base %+d Hz, offset %+d Hz. Press CAL to re-measure" % (self.calConfPath, self.txrxOffsetBase - self.txrxOffsetNominal, self.offsetHz))
             return
-        print ("Loaded calibration: auto %+d Hz (beacon %+d Hz from published) from %s" % (self.autoOffsetHz, self.beaconGuessHz - self.beaconTrueHz, self.calConfPath))
+        self.offsetSlider.setValue(self.offsetHz)   # reflect the stored correction
+        self.offsetLbl2.setText(str(self.offsetHz))
+        print ("Loaded calibration: base %+d Hz, offset %+d Hz%s from %s" % (self.txrxOffsetBase - self.txrxOffsetNominal, self.offsetHz, (" (beacon %+d Hz from published)" % (self.beaconBaseHz - self.beaconTrueHz) if self.beaconBaseHz else ""), self.calConfPath))
 
     def saveCalConf(self):
         try:
@@ -450,14 +440,13 @@ class Ui_MainWindow(object):
                 os.makedirs(d)
             f = open(self.calConfPath, "w")
             f.write("# Written by the CAL button in qo100helper.py\n")
-            f.write("# Absolute correction for LNB / IF / SDR receive-chain error,\n")
-            f.write("# measured against the published QO-100 narrowband CW beacon.\n")
-            f.write("# Receive-only: nothing in this file causes a transmission.\n")
-            f.write("# Delete this file to re-seed the beacon search from published.\n")
-            f.write("beaconTrueHz = %d\n" % self.beaconTrueHz)
-            f.write("beaconGuessHz = %d\n" % self.beaconGuessHz)
+            f.write("# Receive-chain drift correction, measured against the QO-100\n")
+            f.write("# narrowband CW beacon. Receive-only; nothing here transmits.\n")
+            f.write("# Delete this file to re-baseline on the next CAL.\n")
+            f.write("txrxOffsetBase = %d\n" % self.txrxOffsetBase)
+            f.write("beaconBaseHz = %d\n" % self.beaconBaseHz)
             f.write("driftHz = %d\n" % self.calLastDrift)
-            f.write("autoOffsetHz = %d\n" % self.autoOffsetHz)
+            f.write("offsetHz = %d\n" % self.offsetHz)
             f.write("txrxOffsetNominal = %d\n" % self.txrxOffsetNominal)
             f.write("time = %s\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
             f.close()
@@ -588,8 +577,9 @@ class Ui_MainWindow(object):
         self.calSavedTx = str(self.txFreq)
         self.calButton.setEnabled(False)
         self.calButton.setText("CALibrating")
-        self.statusBar.showMessage("Measuring %.6f MHz beacon..." % (self.beaconGuessHz / 1e6))
-        self.requestRxTune(self.beaconGuessHz - self.calPlaceHz) # USB: dial below the beacon
+        centre = self.beaconBaseHz if self.beaconBaseHz else self.beaconTrueHz
+        self.statusBar.showMessage("Measuring %.6f MHz beacon..." % (centre / 1e6))
+        self.requestRxTune(centre - self.calPlaceHz) # USB: dial below the beacon
         w = Worker(self.runCalibrate, savedRx)
         w.signals.result.connect(self.calFinished)
         w.signals.error.connect(self.calFailed)
@@ -630,24 +620,36 @@ class Ui_MainWindow(object):
             self.statusBar.showMessage("CAL: beacon not found - best peak %.1fx noise at %.1f Hz, need %.0fx. Raise gqrx audio output / check the beacon is in view" % (snr, freq, self.calMinSnr))
             return
         drift = int(round(freq - self.calPlaceHz))
-        if abs(drift) > self.calMaxDelta:
-            self.statusBar.showMessage("CAL REFUSED: the beacon moved %+.0f Hz since the last calibration, beyond calMaxDelta. Something other than drift changed (gqrx ppm, an LNB swap, or a new hand alignment) - delete cal.conf to re-seed the search" % drift)
+        if self.beaconBaseHz and abs(drift) > self.calMaxDelta:
+            self.statusBar.showMessage("CAL REFUSED: the beacon moved %+.0f Hz since the last baseline, beyond calMaxDelta. Something other than drift changed (gqrx ppm, an LNB swap, or a fresh hand alignment) - delete cal.conf to re-baseline" % drift)
             return
-        # The dial sits calPlaceHz below the carrier, so the receiver's own idea of
-        # where the beacon is, is the dial plus the measured audio tone. The
-        # correction is that position's WHOLE error against published, not its
-        # motion: txrxOffset = nominal + (apparent - published) is exactly what
-        # makes a carrier transmitted at the paired uplink come back to the dial
-        # frequency the receiver showed, which is the operator's own test for being
-        # on frequency.
-        apparent = self.beaconGuessHz + drift
-        self.calLastDrift = drift
-        self.beaconGuessHz = int(round(apparent))
-        self.autoOffsetHz = self.onGrid(apparent - self.beaconTrueHz)
+        # The dial sits calPlaceHz below the carrier, so the receiver's own idea
+        # of where the beacon is, is the search centre plus the measured audio
+        # offset from calPlaceHz.
+        centre = self.beaconBaseHz if self.beaconBaseHz else self.beaconTrueHz
+        apparent = centre + drift
+        if self.beaconBaseHz:
+            # Track drift: move the slider by exactly how far the beacon moved,
+            # same sign. The slider is the single visible correction; there is
+            # nothing else to hide a value in.
+            self.calLastDrift = drift
+            self.offsetHz = self.onGrid(drift)
+            self.offsetSlider.setValue(self.offsetHz)
+            self.offsetLbl2.setText(str(self.offsetHz))
+        else:
+            # First CAL: anchor here. Fold whatever the operator trimmed into the
+            # stored base and put the slider back on 0, so the baseline reads
+            # clean and the next CAL only ever reports drift.
+            self.txrxOffsetBase = int(self.txrxOffsetBase) + int(self.offsetHz)
+            self.offsetHz = 0
+            self.offsetSlider.setValue(0)
+            self.offsetLbl2.setText("0")
+            self.beaconBaseHz = int(round(apparent))
+            self.calLastDrift = 0
         self.txrxOffset = self.desiredOffset()
         self.saveCalConf()
-        self.updateAutoLabel()
-        self.statusBar.showMessage("CAL: beacon at %.6f MHz = %+d Hz from published (moved %+d Hz, SNR %.0fx) -> auto %+d Hz. TX follows only if LINK/sync is on" % (self.beaconGuessHz / 1e6, self.beaconGuessHz - self.beaconTrueHz, drift, snr, self.autoOffsetHz))
+        self.updateBaseLabel()
+        self.statusBar.showMessage("CAL: beacon at %.6f MHz (%+d Hz from published, SNR %.0fx) -> offset %+d Hz. TX follows only if LINK/sync is on" % (apparent / 1e6, apparent - self.beaconTrueHz, snr, self.offsetHz))
 
     def calFailed(self, errtuple):
         self.calBusy = False
