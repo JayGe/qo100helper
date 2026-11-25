@@ -168,6 +168,9 @@ class Ui_MainWindow(object):
     # Reference only, not used to compute anything: 2.4GHz up-converter LO confirmed
     # by the operator as exactly 1968.000 MHz, NB transponder shift 8089.5 MHz.
     autoOffsetHz = 0           # correction applied by the CAL button (signed Hz)
+    txMinHz = 432050000        # IC-9700 IF limits for the NB uplink (432 MHz IF
+    txMaxHz = 432300000        # + 1968 MHz up-converter = 2400.050-2400.300 MHz)
+    txRefuseShown = -1         # last off-band target already reported, to not spam
     calLastDrift = 0
     calBusy = False
     calTuneReq = 0
@@ -542,8 +545,24 @@ class Ui_MainWindow(object):
             result = self.toneEstimate(samples)
         finally:
             self.requestRxTune(savedRx)              # always put the RX back
-            time.sleep(self.calSettle)
+            self.waitRxRestored(savedRx)             # and make sure it actually got there
         return result
+
+    def waitRxRestored(self, savedRx, limit=5.0):
+        # connTx releases the LINK chase as soon as calFinished clears calBusy,
+        # and the chase follows self.rxFreq. requestRxTune only *asks* connRx to
+        # retune, so a fixed sleep leaves a window where the chase resumes with
+        # the CAL listening frequency still in rxFreq - which parks the
+        # transmitter on the beacon's uplink counterpart, 2399.999 MHz, well
+        # outside the band. Wait for the receiver to read the saved frequency
+        # back, so the chase can only ever resume from where the operator left it.
+        t0 = time.time()
+        while time.time() - t0 < limit:
+            if str(self.rxFreq) == str(savedRx):
+                return True
+            time.sleep(0.1)
+        print ("CAL WARNING: receiver did not read back %s within %.0fs" % (savedRx, limit))
+        return False
 
     def calFinished(self, result):
         freq, mag, snr = result
@@ -668,7 +687,19 @@ class Ui_MainWindow(object):
                     self.pttSet = 0
                 elif (self.linkButton.isChecked() and not self.calBusy): # CAL suspends the chase so the TX never follows the beacon
                     newTx = int(self.rxFreq) - self.txrxOffset
-                    if (int(self.txFreq) != newTx):
+                    if not (self.txMinHz <= newTx <= self.txMaxHz):
+                        # The NB downlink reaches below the transponder's translated
+                        # passband: the CW beacons around 10489.500 MHz map to
+                        # 2399.999 MHz, which is outside the uplink entirely. Parked
+                        # there by hand - or by CAL - the tracker would otherwise
+                        # drive the transmitter off-band and leave it there. Refuse
+                        # to follow, keep the last in-band frequency, say so once.
+                        if newTx != self.txRefuseShown:
+                            self.txRefuseShown = newTx
+                            print ("TX chase refused: %.6f MHz outside the NB uplink (RX %.6f)" % (newTx / 1e6, int(self.rxFreq) / 1e6))
+                            self.statusBar.showMessage("TX chase HELD: %.6f MHz is outside the NB uplink - move the RX into 10489.550-10489.800" % (newTx / 1e6))
+                        connSock.send('f\n'.encode())
+                    elif (int(self.txFreq) != newTx):
                         #print ("Not equal, sync %d to %d" %(int(self.txFreq), newTx))
                         sendString = ('F %s\n'% newTx)
                         connSock.send(sendString.encode())
