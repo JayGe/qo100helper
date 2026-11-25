@@ -745,6 +745,12 @@ class Ui_MainWindow(object):
                 else:
                     connSock.send('f\n'.encode())
                 output = connSock.recv(100).decode()
+                if output == '':
+                    # gqrx closed the connection. It serves ONE remote client, so
+                    # a second helper or a probe taking the slot shows up here as
+                    # an empty read, not a bad command. Raise to reconnect cleanly
+                    # instead of logging it as a "non frequency response".
+                    raise RuntimeError("gqrx closed the remote connection")
                 if str(output).startswith('RPRT'): # ack of an F command, not a frequency
                     continue
                 if not ( re.match(r'^[0-9]+$', str(output)) ): # change to not that or RPRT0
