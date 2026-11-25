@@ -10,6 +10,7 @@ import time
 import traceback, sys, re
 import pulsectl
 import signal, os
+import subprocess, array
 
 signal.signal(signal.SIGINT, signal.SIG_DFL)
 
@@ -118,6 +119,64 @@ class Ui_MainWindow(object):
     offsetHz = 0
     pttSet = 0 # 0 = no change, 1 = request ptt on, 2 = request ptt off
 
+    # ---- Receive-only drift calibration against the QO-100 NB CW beacon -------
+    # CAL measures where the LNB / IF / SDR chain actually puts the narrowband CW
+    # beacon NOW, and corrects only the CHANGE since the baseline below was taken.
+    # The absolute RX<->TX relationship therefore stays whatever you hand-tuned
+    # into txrxOffsetFixed - CAL only removes drift between sessions, which is the
+    # real failure mode. Nothing here ever touches PTT, the transmitter or the amp.
+    beaconHz = 10489500664     # BASELINE: measured apparent position of the NB CW
+                               # beacon on 2026-11-25, with the hand-tuned alignment
+                               # already in use. Agreed to 0.42 Hz from three dial
+                               # positions 1.5 kHz apart; CW ident ~50% duty.
+                               # This is deliberately a measured baseline and NOT a
+                               # claim about the beacon's published frequency, so no
+                               # unverified LO or band-plan number can pull the TX
+                               # off. Two ways to use it:
+                               #   - delete cal.conf -> next CAL re-baselines here
+                               #     (do that after you re-align by hand)
+                               #   - if you confirm the beacon's true frequency from
+                               #     AMSAT-DL, put it here and CAL becomes absolute
+    calPlaceHz = 1500          # park the beacon here in the USB audio passband.
+                               # USB audio = RF - dial, so the dial goes BELOW it
+    calSeconds = 8.0           # capture length; the beacon idents, so give it time
+    calMinSep = 40.0           # a rival this close is keying sideband, not a rival
+    calRivalRatio = 0.4        # a rival this strong means "do not guess"
+    calKeyFrame = 0.2          # detection frame: >= one Morse element so a keyed
+    calKeyHop = 0.05           # carrier appears undiluted in at least one frame
+    calRefineHz = 25.0         # +/- Hz around the detected carrier for fine tuning
+    calSettle = 0.8            # let gqrx re-lock before capturing / restoring
+    calFs = 48000              # capture rate
+    calDecim = 6               # 48k -> 8k, keeps the 1.5k tone well inside Nyquist
+    calSearch = 250            # +/- Hz searched around calPlaceHz. Covers the
+                               # operator's stated drift ("a couple of hundred Hz")
+                               # and is deliberately SMALLER than the 390 Hz
+                               # spacing to a persistent carrier measured below the
+                               # beacon: at 400 that rival sat inside the band and
+                               # CAL correctly refused every run as ambiguous. If
+                               # CAL ever reports two carriers, do not widen this
+                               # past the rival - re-baseline on a cleaner carrier.
+                               # Tone stays in gqrx's 100-3500 Hz passband.
+    calMinSnr = 15.0           # peak / band-noise-median. Measured with margin: the
+                               # real beacon gives 94-220x even while keyed, whereas
+                               # a false lock on a stray digimode carrier measured
+                               # 4.7x. 4.0 let that false lock through - do not go
+                               # back there.
+    calMaxDelta = 1000         # refuse a correction larger than this: past ordinary
+                               # drift, something else changed (gqrx ppm, LNB, or a
+                               # fresh hand alignment) and needs re-baselining.
+    # Reference only, not used to compute anything: 2.4GHz up-converter LO confirmed
+    # by the operator as exactly 1968.000 MHz, NB transponder shift 8089.5 MHz.
+    autoOffsetHz = 0           # correction applied by the CAL button (signed Hz)
+    calLastDrift = 0
+    calBusy = False
+    calTuneReq = 0
+    calTuneFreq = "0"
+    calSavedRx = "0"
+    calSavedTx = "0"
+    calText = "CAL RX (beacon)"
+    calConfPath = os.path.expanduser("~/.config/qo100helper/cal.conf")
+
     for x in pulse.sink_list() :
         if re.search(soundcardName, getattr(x, 'description', '')) :
             break
@@ -203,6 +262,23 @@ class Ui_MainWindow(object):
         self.pttButton.setObjectName("pttButton")
         self.pttButton.clicked.connect(self.setPtt) # Added
 
+        self.calButton = QPushButton(self.centralWidget)
+        self.calButton.setGeometry(QRect(440, 250, 145, 30))
+        font = QFont()
+        font.setPointSize(11)
+        self.calButton.setFont(font)
+        self.calButton.setObjectName("calButton")
+        self.calButton.clicked.connect(self.startCalibrate) # Added
+
+        self.autoLbl = QLabel(self.centralWidget)
+        self.autoLbl.setGeometry(QRect(591, 252, 150, 27))
+        font = QFont()
+        font.setPointSize(11)
+        self.autoLbl.setFont(font)
+        self.autoLbl.setLayoutDirection(Qt.LeftToRight)
+        self.autoLbl.setAlignment(Qt.AlignRight|Qt.AlignTrailing|Qt.AlignVCenter)
+        self.autoLbl.setObjectName("autoLbl")
+
         self.offsetLbl3 = QLabel(self.centralWidget)
         self.offsetLbl3.setGeometry(QRect(200, 170, 71, 31))
         font = QFont()
@@ -226,6 +302,10 @@ class Ui_MainWindow(object):
 
         self.threadpool = QThreadPool()
 
+        self.loadCalConf()      # pick up the last CAL before the rigs start talking
+        self.txrxOffset = self.desiredOffset()
+        self.updateAutoLabel()
+
         rxWorker = Worker(self.connRx)
         self.threadpool.start(rxWorker)
 
@@ -248,6 +328,8 @@ class Ui_MainWindow(object):
         self.linkButton.setText(_translate("MainWindow", "<< LINK >>"))
         self.pttButton.setText(_translate("MainWindow", "PTT"))
         self.offsetLbl3.setText(_translate("MainWindow", "Hz"))
+        self.calButton.setText(_translate("MainWindow", self.calText))
+        self.autoLbl.setText("auto 0 Hz")
 
     def setMute(self): # Added
         if self.pttButton.isChecked():
@@ -272,6 +354,225 @@ class Ui_MainWindow(object):
     def offsetChange(self):
         self.offsetHz = int(round(self.offsetSlider.value(), -1))
         self.offsetLbl2.setText(str(self.offsetHz))
+
+    # ---------- receive-only RX calibration ----------
+    # The slider can only express 10 Hz steps (round(x, -1)), so the calibration
+    # result is kept separately as a precise integer trim and summed with it:
+    #     txrxOffset = fixed + auto - manual
+
+    def desiredOffset(self):
+        return int(self.txrxOffsetFixed) + int(self.autoOffsetHz) - int(self.offsetHz)
+
+    def updateAutoLabel(self):
+        try:
+            self.autoLbl.setText("auto %+d Hz" % self.autoOffsetHz)
+        except:
+            pass
+
+    def loadCalConf(self):
+        try:
+            f = open(self.calConfPath)
+            txt = f.read()
+            f.close()
+            m = re.search(r'autoOffsetHz\s*=\s*(-?\d+)', txt)
+            if m:
+                self.autoOffsetHz = int(m.group(1))
+                m = re.search(r'driftHz\s*=\s*(-?\d+)', txt)
+                if m:
+                    self.calLastDrift = int(m.group(1))
+                print ("Loaded calibration: auto %+d Hz from %s" % (self.autoOffsetHz, self.calConfPath))
+        except:
+            pass # no calibration saved yet, that's fine
+
+    def saveCalConf(self):
+        try:
+            d = os.path.dirname(self.calConfPath)
+            if not os.path.isdir(d):
+                os.makedirs(d)
+            f = open(self.calConfPath, "w")
+            f.write("# Written by the CAL button in qo100helper.py\n")
+            f.write("# Drift correction for LNB / IF / SDR receive-chain wander,\n")
+            f.write("# measured against the QO-100 narrowband CW beacon baseline.\n")
+            f.write("# Receive-only: nothing in this file causes a transmission.\n")
+            f.write("# Delete this file to re-baseline after a hand alignment.\n")
+            f.write("beaconBaselineHz = %d\n" % self.beaconHz)
+            f.write("driftHz = %d\n" % self.calLastDrift)
+            f.write("autoOffsetHz = %d\n" % self.autoOffsetHz)
+            f.write("txrxOffsetNominal = %d\n" % self.txrxOffsetFixed)
+            f.write("time = %s\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
+            f.close()
+        except Exception as msg:
+            print ("Could not write %s: %s" % (self.calConfPath, msg))
+
+    def requestRxTune(self, freq):
+        # Handed to connRx, which owns the only socket to gqrx - no second client,
+        # so we never fight it or WSJT-X for the receiver.
+        self.calTuneFreq = str(freq)
+        self.calTuneReq = 1
+
+    def captureAudio(self, seconds):
+        sink = None
+        for s in self.pulse.sink_list():
+            if re.search(self.soundcardName, getattr(s, 'description', '') or ''):
+                sink = s
+                break
+        if sink is None:
+            raise RuntimeError("audio sink '%s' not found" % self.soundcardName)
+        if str(getattr(sink, 'mute', 0)) in ('True', '1'):
+            raise RuntimeError("audio sink is muted - clear Mute On TX before calibrating")
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error",
+               "-f", "pulse", "-i", str(sink.name) + ".monitor",
+               "-t", "%.2f" % seconds, "-ac", "1", "-ar", str(self.calFs),
+               "-f", "s16le", "-"]
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           timeout=int(seconds) + 25)
+        if p.returncode != 0:
+            raise RuntimeError("audio capture failed: %s" % p.stderr.decode()[-200:])
+        a = array.array('h')
+        a.frombytes(p.stdout)
+        if len(a) < int(self.calFs * seconds * 0.5):
+            raise RuntimeError("only got %d audio samples" % len(a))
+        return a
+
+    def toneEstimate(self, samples):
+        # Two stages, because the NB beacon is CW-keyed and a single transform
+        # cannot both find it and measure it:
+        #
+        # 1. DETECT on short frames (>= one Morse element), taking the per-bin
+        #    MAXIMUM across them. A DFT peak scales with the carrier's duty cycle
+        #    *inside the window*, so one long FFT showed the beacon at ~50% of its
+        #    true level and a steady rival 397 Hz below it won the search - the
+        #    real 2026-11-25 wrong answer. Short frames catch a key-on element at
+        #    full amplitude, so carriers are compared on true strength.
+        # 2. MEASURE with one long zero-padded FFT, but only in a narrow window
+        #    around the carrier stage 1 picked, using log-parabolic interpolation.
+        #    Short frames alone give only 5 Hz resolution.
+        #
+        # Deliberately NOT a sweep of discrete probe frequencies either: with a
+        # T-second window the leakage pattern has nulls every 1/T Hz, so a probe
+        # grid at a multiple of that spacing can read a tone as exactly ZERO.
+        import numpy as np
+        d = self.calDecim
+        fs = float(self.calFs)
+        x = np.asarray(samples, dtype=np.float64)
+        x = x[:(len(x) // d) * d].reshape(-1, d).mean(axis=1) # box-car decimate
+        fs /= d
+        x = x - x.mean()
+        frame = int(fs * self.calKeyFrame)
+        hop = int(fs * self.calKeyHop)
+        if frame < 32 or hop < 1 or len(x) < frame + hop:
+            raise RuntimeError("capture too short for framing")
+        nfft = 1
+        while nfft < frame * 8:
+            nfft *= 2
+        w = np.hanning(frame)
+        pool = np.zeros(nfft // 2 + 1)
+        for i in range(0, len(x) - frame + 1, hop):
+            pool = np.maximum(pool, np.abs(np.fft.rfft(x[i:i + frame] * w, nfft)))
+        fr = np.fft.rfftfreq(nfft, 1.0 / fs)
+        band = np.where((fr >= self.calPlaceHz - self.calSearch) &
+                        (fr <= self.calPlaceHz + self.calSearch))[0]
+        if len(band) < 8:
+            raise RuntimeError("search band above Nyquist - reduce calPlaceHz/calSearch")
+        k = int(band[int(np.argmax(pool[band]))])
+        peak = float(pool[k])
+        coarsef = float(fr[k])
+        noise = float(np.median(pool[band])) + 1e-15
+        snr = peak / noise
+        # SNR gate first: with nothing in the band the band median IS the peak
+        # area, and every peak looks like a rival. Say "not found", not "ambiguous".
+        if snr < self.calMinSnr:
+            return coarsef, peak, snr
+        # Ambiguity guard, judged on the keying-robust pooled spectrum: a second
+        # carrier of comparable strength elsewhere in the band makes picking the
+        # strongest a coin toss. Refuse instead of guessing.
+        rivals = [j for j in band if abs(float(fr[j]) - coarsef) > self.calMinSep
+                  and float(pool[j]) > self.calRivalRatio * peak]
+        if rivals:
+            near = min(rivals, key=lambda j: abs(float(fr[j]) - coarsef))
+            raise RuntimeError("two carriers of comparable strength in the search band (%.1f Hz and %.1f Hz) - refusing to guess" % (coarsef, float(fr[near])))
+        # Stage 2: fine measurement of the already-identified carrier.
+        nfft2 = 1
+        while nfft2 < len(x) * 8:
+            nfft2 *= 2
+        sp2 = np.abs(np.fft.rfft(x * np.hanning(len(x)), nfft2))
+        fr2 = np.fft.rfftfreq(nfft2, 1.0 / fs)
+        win = np.where((fr2 >= coarsef - self.calRefineHz) &
+                       (fr2 <= coarsef + self.calRefineHz))[0]
+        if len(win) < 8:
+            return coarsef, peak, snr
+        k2 = int(win[int(np.argmax(sp2[win]))])
+        if k2 < 1 or k2 + 1 >= len(sp2):
+            return coarsef, peak, snr
+        la = np.log(max(float(sp2[k2 - 1]), 1e-30))
+        lb = np.log(max(float(sp2[k2]), 1e-30))
+        lc = np.log(max(float(sp2[k2 + 1]), 1e-30))
+        denom = la - 2.0 * lb + lc
+        delta = 0.0 if denom == 0 else max(-1.0, min(1.0, 0.5 * (la - lc) / denom))
+        peakf = float(fr2[k2] + delta * (fs / nfft2))
+        return peakf, peak, snr
+
+    def startCalibrate(self):
+        if self.calBusy:
+            self.statusBar.showMessage("Calibration already running")
+            return
+        if self.pttButton.isChecked():
+            self.statusBar.showMessage("Release PTT before calibrating")
+            return
+        savedRx = str(self.rxFreq)
+        if not re.match(r'^[0-9]+$', savedRx):
+            self.statusBar.showMessage("Receiver not answering - cannot calibrate")
+            return
+        self.calBusy = True      # also suspends the LINK chase so the TX never follows the beacon
+        self.calSavedRx = savedRx
+        self.calSavedTx = str(self.txFreq)
+        self.calButton.setEnabled(False)
+        self.calButton.setText("CALibrating")
+        self.statusBar.showMessage("Measuring %.3f MHz beacon..." % (self.beaconHz / 1e6))
+        self.requestRxTune(self.beaconHz - self.calPlaceHz) # USB: dial below the beacon
+        w = Worker(self.runCalibrate, savedRx)
+        w.signals.result.connect(self.calFinished)
+        w.signals.error.connect(self.calFailed)
+        self.threadpool.start(w)
+
+    def runCalibrate(self, savedRx):
+        try:
+            time.sleep(self.calSettle)               # gqrx re-lock
+            samples = self.captureAudio(self.calSeconds)
+            result = self.toneEstimate(samples)
+        finally:
+            self.requestRxTune(savedRx)              # always put the RX back
+            time.sleep(self.calSettle)
+        return result
+
+    def calFinished(self, result):
+        freq, mag, snr = result
+        self.calBusy = False
+        self.calButton.setEnabled(True)
+        self.calButton.setText(self.calText)
+        if snr < self.calMinSnr:
+            self.statusBar.showMessage("CAL: beacon not found - best peak %.1fx noise at %.1f Hz, need %.0fx. Raise gqrx audio output / check the beacon is in view" % (snr, freq, self.calMinSnr))
+            return
+        drift = int(round(freq - self.calPlaceHz))
+        if abs(drift) > self.calMaxDelta:
+            self.statusBar.showMessage("CAL REFUSED: %.0f Hz from the baseline is beyond calMaxDelta. Something other than drift changed (gqrx ppm, LNB, or a new hand alignment) - delete cal.conf to re-baseline" % drift)
+            return
+        # txrxOffset must move by exactly the amount the beacon moved, same sign:
+        # the baseline was taken with this offset already correct, so any further
+        # apparent motion of the beacon is pure receive-chain drift.
+        self.calLastDrift = drift
+        self.autoOffsetHz = drift
+        self.txrxOffset = self.desiredOffset()
+        self.saveCalConf()
+        self.updateAutoLabel()
+        self.statusBar.showMessage("CAL: beacon %+d Hz from baseline (SNR %.0fx) -> offset %d (%+d Hz). Beacon now reads %+d Hz. TX follows only if LINK/sync is on" % (drift, snr, self.txrxOffset, drift, drift))
+
+    def calFailed(self, errtuple):
+        self.calBusy = False
+        self.calButton.setEnabled(True)
+        self.calButton.setText(self.calText)
+        self.statusBar.showMessage("CAL failed: %s" % str(errtuple[1]))
+        print ("".join(traceback.format_exception(*errtuple)))
 
     def syncTx(self):
         #print ("sync Tx Txold: %d Rxnow: %d" % (int(self.txFreq), int(self.rxFreq)))
@@ -306,6 +607,16 @@ class Ui_MainWindow(object):
             connSock.connect((self.rxHost, self.rxPort))
             while 1:
                 time.sleep(0.1)
+                if (self.calTuneReq): # CAL wants the receiver somewhere specific
+                    connSock.send(('F %s\n' % self.calTuneFreq).encode())
+                    self.calTuneReq = 0
+                    try:
+                        connSock.settimeout(1.0)
+                        connSock.recv(100)
+                        connSock.settimeout(None)
+                    except:
+                        pass
+                    continue
                 if (self.syncRxReq):
                     #connSock.send('F %s' % self.rxFreq)
                     sendString = ('F %s' % self.syncRxFreq)
@@ -315,6 +626,8 @@ class Ui_MainWindow(object):
                 else:
                     connSock.send('f\n'.encode())
                 output = connSock.recv(100).decode()
+                if str(output).startswith('RPRT'): # ack of an F command, not a frequency
+                    continue
                 if not ( re.match(r'^[0-9]+$', str(output)) ): # change to not that or RPRT0
                     print ("Unexpected non frequency response from hamlib: " + str(output)) # not strictly true F does this
                     continue
@@ -335,8 +648,9 @@ class Ui_MainWindow(object):
             connSock.connect((self.txHost, self.txPort))
             while 1:
                 time.sleep(0.1)
-                if ((self.txrxOffsetFixed - self.offsetHz) != self.txrxOffset): # Adjust TX offset if changed in GUI
-                    self.txrxOffset = self.txrxOffsetFixed  - self.offsetHz
+                wantOffset = self.desiredOffset() # nominal + CAL trim - slider
+                if (wantOffset != self.txrxOffset): # Adjust TX offset if changed in GUI or by CAL
+                    self.txrxOffset = wantOffset
                 if (self.syncTxReq):
                     #print ("TX Sync requested %s" % self.syncTxFreq)
                     sendString=('F %s\n' % self.syncTxFreq)
@@ -352,7 +666,7 @@ class Ui_MainWindow(object):
                     connSock.send('T 0\n'.encode())
                     os.system("(/usr/bin/mosquitto_pub -h 192.168.0.201 -t '/radio/amp/set2' -m 'OFF')")
                     self.pttSet = 0
-                elif (self.linkButton.isChecked()): 
+                elif (self.linkButton.isChecked() and not self.calBusy): # CAL suspends the chase so the TX never follows the beacon
                     newTx = int(self.rxFreq) - self.txrxOffset
                     if (int(self.txFreq) != newTx):
                         #print ("Not equal, sync %d to %d" %(int(self.txFreq), newTx))
