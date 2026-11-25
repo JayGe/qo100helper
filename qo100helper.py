@@ -274,7 +274,7 @@ class Ui_MainWindow(object):
         self.pttButton.clicked.connect(self.setPtt) # Added
 
         self.calButton = QPushButton(self.centralWidget)
-        self.calButton.setGeometry(QRect(440, 250, 145, 30))
+        self.calButton.setGeometry(QRect(300, 4, 150, 26))
         font = QFont()
         font.setPointSize(11)
         self.calButton.setFont(font)
@@ -282,7 +282,7 @@ class Ui_MainWindow(object):
         self.calButton.clicked.connect(self.startCalibrate) # Added
 
         self.autoLbl = QLabel(self.centralWidget)
-        self.autoLbl.setGeometry(QRect(591, 252, 150, 27))
+        self.autoLbl.setGeometry(QRect(160, 252, 200, 24))
         font = QFont()
         font.setPointSize(11)
         self.autoLbl.setFont(font)
@@ -301,9 +301,13 @@ class Ui_MainWindow(object):
         self.mainToolBar.setObjectName("mainToolBar")
         MainWindow.addToolBar(Qt.TopToolBarArea, self.mainToolBar)
 
-        self.ampAction = QAction("Amp On TX", MainWindow)
-        self.ampAction.setCheckable(True)
-        self.mainToolBar.addAction(self.ampAction)
+        # "Amp On TX" was a toolbar action. As a widget it can take the space
+        # under the offset slider, which frees the top of the window for the CAL
+        # button - the bottom row was being clipped at this window size.
+        self.ampAction = QCheckBox("Amp On TX", self.centralWidget)
+        self.ampAction.setGeometry(QRect(10, 250, 140, 26))
+        self.ampAction.setObjectName("ampAction")
+        MainWindow.removeToolBar(self.mainToolBar)
         self.statusBar = QStatusBar(MainWindow)
         self.statusBar.setObjectName("statusBar")
         MainWindow.setStatusBar(self.statusBar)
