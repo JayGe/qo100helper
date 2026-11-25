@@ -393,7 +393,7 @@ class Ui_MainWindow(object):
         return v if hz >= 0 else -v
 
     def desiredOffset(self):
-        return int(self.txrxOffsetBase) + int(self.offsetHz)
+        return int(self.txrxOffsetBase) - int(self.offsetHz)
 
     def updateBaseLabel(self):
         try:
@@ -639,18 +639,19 @@ class Ui_MainWindow(object):
         centre = self.beaconBaseHz if self.beaconBaseHz else self.beaconTrueHz
         apparent = centre + drift
         if self.beaconBaseHz:
-            # Track drift: move the slider by exactly how far the beacon moved,
-            # same sign. The slider is the single visible correction; there is
-            # nothing else to hide a value in.
+            # Track drift. desiredOffset() is "base - slider", so a beacon that
+            # has moved UP (the receiver now reads higher) needs the slider moved
+            # DOWN to raise the offset and lower the TX by the same amount.
             self.calLastDrift = drift
-            self.offsetHz = self.onGrid(drift)
+            self.offsetHz = self.onGrid(-drift)
             self.offsetSlider.setValue(self.offsetHz)
             self.offsetLbl2.setText(str(self.offsetHz))
         else:
             # First CAL: anchor here. Fold whatever the operator trimmed into the
             # stored base and put the slider back on 0, so the baseline reads
-            # clean and the next CAL only ever reports drift.
-            self.txrxOffsetBase = int(self.txrxOffsetBase) + int(self.offsetHz)
+            # clean and the next CAL only ever reports drift. desiredOffset() is
+            # "base - slider", so subtract the slider to keep the same total.
+            self.txrxOffsetBase = int(self.txrxOffsetBase) - int(self.offsetHz)
             self.offsetHz = 0
             self.offsetSlider.setValue(0)
             self.offsetLbl2.setText("0")
@@ -733,7 +734,7 @@ class Ui_MainWindow(object):
                     continue
                 if (self.syncRxReq):
                     #connSock.send('F %s' % self.rxFreq)
-                    sendString = ('F %s' % self.syncRxFreq)
+                    sendString = ('F %s\n' % self.syncRxFreq)
                     connSock.send(sendString.encode())
                     #connSock.send('F %s'.encode() % self.syncRxFreq)
                     self.syncRxReq = 0
@@ -816,7 +817,21 @@ class Ui_MainWindow(object):
                             self.txRefuseShown = newTx
                             print ("TX chase refused: %.6f MHz outside the NB uplink (RX %.6f)" % (newTx / 1e6, int(self.rxFreq) / 1e6))
                             self.statusBar.showMessage("TX chase HELD: %.6f MHz is outside the NB uplink - move the RX into 10489.550-10489.800" % (newTx / 1e6))
-                        connSock.send('f\n'.encode())
+                        # Refuse to follow the out-of-band target, but if the
+                        # transmitter has somehow already ended up off-band (a
+                        # manual sync or an old bug), pull it back to the nearest
+                        # band edge instead of holding it there.
+                        try:
+                            curTx = int(self.txFreq)
+                        except ValueError:
+                            curTx = 0
+                        if curTx and not (self.txMinHz <= curTx <= self.txMaxHz):
+                            clamped = max(self.txMinHz, min(self.txMaxHz, curTx))
+                            sendString = ('F %s\n' % clamped)
+                            connSock.send(sendString.encode())
+                            self.txFreq = str(clamped)
+                        else:
+                            connSock.send('f\n'.encode())
                     elif (int(self.txFreq) != newTx):
                         #print ("Not equal, sync %d to %d" %(int(self.txFreq), newTx))
                         sendString = ('F %s\n'% newTx)
