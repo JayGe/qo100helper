@@ -167,6 +167,11 @@ class Ui_MainWindow(object):
                                # changed - gqrx ppm, an LNB swap, or a fresh hand
                                # alignment - and the stored guess needs re-seeding
                                # rather than a confident wrong answer.
+    calMinDrift = 100          # below this the beacon hasn't verifiably moved: an
+                               # FSK beacon is only measurable to a few tens of Hz,
+                               # and calling that "drift" moves the transmitter on
+                               # noise. Below the floor, CAL reports stable and
+                               # leaves the slider alone.
     # Reference only, not used to compute anything: 2.4GHz up-converter LO confirmed
     # by the operator as exactly 1968.000 MHz, NB transponder shift 8089.5 MHz.
     gridHz = 10                # the slider cannot express anything finer and a
@@ -642,6 +647,16 @@ class Ui_MainWindow(object):
             # Track drift. desiredOffset() is "base - slider", so a beacon that
             # has moved UP (the receiver now reads higher) needs the slider moved
             # DOWN to raise the offset and lower the TX by the same amount.
+            if abs(drift) < self.calMinDrift:
+                # Below calMinDrift the beacon hasn't verifiably moved: an FSK
+                # beacon is only measurable to a few tens of Hz, and treating
+                # that as drift nudges the transmitter on noise. Report stable
+                # and leave the slider where the operator left it.
+                self.calLastDrift = drift
+                self.statusBar.showMessage("CAL: beacon stable (%+d Hz < %+d Hz floor) - offset unchanged" % (drift, self.calMinDrift))
+                self.saveCalConf()
+                self.updateBaseLabel()
+                return
             self.calLastDrift = drift
             self.offsetHz = self.onGrid(-drift)
             self.offsetSlider.setValue(self.offsetHz)
