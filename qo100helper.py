@@ -81,12 +81,14 @@ class Worker(QRunnable):
 class Ui_MainWindow(object):
 
     #txrxOffset = 10057500000 # Difference between rx & tx 
-    txrxOffsetFixed = 10057500000 # Difference between rx & tx 
+    #txrxOffsetFixed = 10057500300 # Difference between rx & tx 
+    txrxOffsetFixed = 10057499900 # Difference between rx & tx 
+
     txrxOffset = txrxOffsetFixed
     #txrxOffset = 10057500080 # Difference between rx & tx 
     #txrxOffset = 10057500030 # Difference between rx & tx 
     #txrxOffset = 10057500050 # Difference between rx & tx 
-    #txrxOffset = 10057499700 # Difference between rx & tx 
+    #txrxOffset = 10057498000 # Difference between rx & tx 
     #txrxOffset = 10057499950 # Difference between rx & tx 
     #txrxOffset = 10057499930 # Difference between rx & tx 
     #txrxOffset = 10057499900 # Difference between rx & tx 
@@ -95,11 +97,11 @@ class Ui_MainWindow(object):
     #txrxOffset = 10057500250 # Difference between rx & tx  # RTL +650 Hz
     #txrxOffset = 10057500700 # Difference between rx & tx  # RTL +650 Hz
     rxHost = "localhost" # expecting rx to be 10498
-    rxPort = 7356
+    rxPort = 7357 # gqrx
     txHost = "localhost" # expecting 432.
-    txPort = 4568
-    soundcardName = 'HyperX Virtual Surround Sound Analogue Stereo' # Get sound card name from list with output from below script
-
+    txPort = 4597 # 9700
+    #txPort = 4568 # 9700
+    soundcardName = 'Built-in Audio Analogue Stereo'  # audio sink muted on TX (gqrx RX audio plays here)
     #pulseDev = 1 	# Audio sink in pulse to mute, list devs with: 
 			# import pulsectl 
 			# pulse = pulsectl.Pulse('my-client-name') 
@@ -117,13 +119,13 @@ class Ui_MainWindow(object):
     pttSet = 0 # 0 = no change, 1 = request ptt on, 2 = request ptt off
 
     for x in pulse.sink_list() :
-        if re.search(soundcardName, str(x)) :
+        if re.search(soundcardName, getattr(x, 'description', '')) :
             break
         pulseDev = pulseDev+1;
 
     def setupUi(self, MainWindow):
         MainWindow.setObjectName("MainWindow")
-        MainWindow.resize(759, 284)
+        MainWindow.resize(759, 320)
         MainWindow.setFixedSize(MainWindow.size())
         self.centralWidget = QWidget(MainWindow)
         self.centralWidget.setObjectName("centralWidget")
@@ -211,6 +213,10 @@ class Ui_MainWindow(object):
         self.mainToolBar = QToolBar(MainWindow)
         self.mainToolBar.setObjectName("mainToolBar")
         MainWindow.addToolBar(Qt.TopToolBarArea, self.mainToolBar)
+
+        self.ampAction = QAction("Amp On TX", MainWindow)
+        self.ampAction.setCheckable(True)
+        self.mainToolBar.addAction(self.ampAction)
         self.statusBar = QStatusBar(MainWindow)
         self.statusBar.setObjectName("statusBar")
         MainWindow.setStatusBar(self.statusBar)
@@ -225,6 +231,9 @@ class Ui_MainWindow(object):
 
         txWorker = Worker(self.connTx)
         self.threadpool.start(txWorker)
+
+        pttWorker = Worker(self.connPtt)
+        self.threadpool.start(pttWorker)
 
     def retranslateUi(self, MainWindow):
         _translate = QCoreApplication.translate
@@ -307,7 +316,7 @@ class Ui_MainWindow(object):
                     connSock.send('f\n'.encode())
                 output = connSock.recv(100).decode()
                 if not ( re.match(r'^[0-9]+$', str(output)) ): # change to not that or RPRT0
-                    #print ("Unexpected non frequency response from hamlib: " + str(output)) # not strictly true F does this
+                    print ("Unexpected non frequency response from hamlib: " + str(output)) # not strictly true F does this
                     continue
                 self.rxFreq = str(output)
                 #print ('RX Frequency offset: %d read: %d real: %d' % (self.offsetHz, int(self.rxFreq), (int(self.rxFreq) + self.offsetHz)))
@@ -371,6 +380,30 @@ class Ui_MainWindow(object):
             print ('Could not connect to Tx.')
             os._exit(1)
             
+    def connPtt(self):
+        # Follow the rig PTT state and key the amp via MQTT when "Amp On TX" is checked.
+        try:
+            connSock = socket(AF_INET, SOCK_STREAM)
+            connSock.connect((self.txHost, self.txPort))
+            last = None
+            while 1:
+                time.sleep(0.2)
+                if not self.ampAction.isChecked():
+                    last = None
+                    continue
+                connSock.send('t\n'.encode())
+                output = connSock.recv(100).decode().strip()
+                ptt = 1 if output == '1' else 0
+                if ptt != last:
+                    last = ptt
+                    os.system("(/usr/bin/mosquitto_pub -h 192.168.0.201 -t '/radio/amp/set2' -m '%s')" % ('ON' if ptt else 'OFF'))
+                    if self.muteButton.isChecked():
+                        self.pulse.mute(self.pulse.sink_list()[self.pulseDev], bool(ptt))
+        except:
+            print('Could not connect to Tx for amp keying.')
+            return
+
+
 if __name__ == "__main__":
     import sys
     app = QApplication(sys.argv)
