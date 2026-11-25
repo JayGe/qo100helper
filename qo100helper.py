@@ -171,6 +171,14 @@ class Ui_MainWindow(object):
     txMinHz = 432050000        # IC-9700 IF limits for the NB uplink (432 MHz IF
     txMaxHz = 432300000        # + 1968 MHz up-converter = 2400.050-2400.300 MHz)
     txRefuseShown = -1         # last off-band target already reported, to not spam
+    sockTimeout = 5.0          # seconds before a silent gqrx/rigctld link counts
+                               # as dead. Without it recv() blocks forever: the
+                               # thread neither raises nor updates, so the RX LCD
+                               # and the LINK chase keep working from a stale
+                               # frequency and nothing anywhere looks wrong.
+    rxLinkDown = False         # only say "restored" after we said "lost", so the
+    txLinkDown = False         # status bar never claims a recovery that never
+    pttLinkDown = False        # followed a failure
     calLastDrift = 0
     calBusy = False
     calTuneReq = 0
@@ -621,9 +629,29 @@ class Ui_MainWindow(object):
             self.linkButton.setStyleSheet("background-color: light grey;")
 
     def connRx(self):
+        # Survive a dropped gqrx remote connection. gqrx serves ONE remote
+        # client, so anything that briefly takes the slot - a diagnostic script,
+        # a gqrx restart, a hiccup - lands in the bare except below, which used
+        # to call os._exit(1). That killed the whole helper silently, stopping
+        # PTT and amp supervision mid-session and leaving the transmitter
+        # stranded wherever it last pointed. Retry instead.
+        while 1:
+            try:
+                self.connRxOnce()
+            except:
+                print ("RX link lost: %s" % traceback.format_exc().splitlines()[-1])
+                self.statusBar.showMessage("Receiver link lost - retrying every second")
+                self.rxLinkDown = True
+                time.sleep(1.0)
+
+    def connRxOnce(self):
         try:
             connSock = socket(AF_INET, SOCK_STREAM)
             connSock.connect((self.rxHost, self.rxPort))
+            connSock.settimeout(self.sockTimeout)
+            if self.rxLinkDown:
+                self.rxLinkDown = False
+                self.statusBar.showMessage("Receiver link restored")
             while 1:
                 time.sleep(0.1)
                 if (self.calTuneReq): # CAL wants the receiver somewhere specific
@@ -632,7 +660,7 @@ class Ui_MainWindow(object):
                     try:
                         connSock.settimeout(1.0)
                         connSock.recv(100)
-                        connSock.settimeout(None)
+                        connSock.settimeout(self.sockTimeout)
                     except:
                         pass
                     continue
@@ -659,12 +687,35 @@ class Ui_MainWindow(object):
                 #self.lcdRx.display(self.rxFreq)
             ConnSock.close()
         except:
-            print ('Could not connect to Rx.')
-            os._exit(1)
+            try:
+                connSock.close()
+            except:
+                pass
+            raise
+
     def connTx(self): # ****** make sure turns PTT off when program exits? ********
+        # Same retry policy as connRx: losing rigctld must not end the program,
+        # or the amp could stay keyed with nobody watching. Forcing txFreq to an
+        # impossible value makes the chase re-send the wanted frequency as soon
+        # as the link is back, rather than trusting a pre-outage reading.
+        while 1:
+            try:
+                self.connTxOnce()
+            except:
+                print ("TX link lost: %s" % traceback.format_exc().splitlines()[-1])
+                self.statusBar.showMessage("Transmitter link lost - retrying every second")
+                self.txLinkDown = True
+                self.txFreq = "0"
+                time.sleep(1.0)
+
+    def connTxOnce(self):
         try:
             connSock = socket(AF_INET, SOCK_STREAM)
             connSock.connect((self.txHost, self.txPort))
+            connSock.settimeout(self.sockTimeout)
+            if self.txLinkDown:
+                self.txLinkDown = False
+                self.statusBar.showMessage("Transmitter link restored")
             while 1:
                 time.sleep(0.1)
                 wantOffset = self.desiredOffset() # nominal + CAL trim - slider
@@ -722,14 +773,34 @@ class Ui_MainWindow(object):
                 #self.lcdTx.display(self.txFreq)  
             ConnSock.close()
         except:
-            print ('Could not connect to Tx.')
-            os._exit(1)
-            
+            try:
+                connSock.close()
+            except:
+                pass
+            raise
+
     def connPtt(self):
+        # Same retry policy as connRx/connTx. This one matters most: if the
+        # thread dies, "Amp On TX" silently stops keying the amp in step with
+        # the rig and nothing anywhere says so.
+        while 1:
+            try:
+                self.connPttOnce()
+            except:
+                print ("Amp keying link lost: %s" % traceback.format_exc().splitlines()[-1])
+                self.statusBar.showMessage("Amp keying link lost - retrying every second")
+                self.pttLinkDown = True
+                time.sleep(1.0)
+
+    def connPttOnce(self):
         # Follow the rig PTT state and key the amp via MQTT when "Amp On TX" is checked.
         try:
             connSock = socket(AF_INET, SOCK_STREAM)
             connSock.connect((self.txHost, self.txPort))
+            connSock.settimeout(self.sockTimeout)
+            if self.pttLinkDown:
+                self.pttLinkDown = False
+                self.statusBar.showMessage("Amp keying link restored")
             last = None
             while 1:
                 time.sleep(0.2)
@@ -745,8 +816,11 @@ class Ui_MainWindow(object):
                     if self.muteButton.isChecked():
                         self.pulse.mute(self.pulse.sink_list()[self.pulseDev], bool(ptt))
         except:
-            print('Could not connect to Tx for amp keying.')
-            return
+            try:
+                connSock.close()
+            except:
+                pass
+            raise
 
 
 if __name__ == "__main__":
