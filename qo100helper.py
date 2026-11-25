@@ -728,9 +728,13 @@ class Ui_MainWindow(object):
                     try:
                         connSock.settimeout(1.0)
                         connSock.recv(100)
-                        connSock.settimeout(self.sockTimeout)
                     except:
                         pass
+                    finally:
+                        # Always restore the long timeout: if the short recv above
+                        # timed out, leaving 1 s in place made every following poll
+                        # fail and the link "lost" during a CAL.
+                        connSock.settimeout(self.sockTimeout)
                     continue
                 if (self.syncRxReq):
                     #connSock.send('F %s' % self.rxFreq)
