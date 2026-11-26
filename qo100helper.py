@@ -330,14 +330,19 @@ class Ui_MainWindow(object):
         self.txrxOffset = self.desiredOffset()
         self.updateBaseLabel()
 
-        rxWorker = Worker(self.connRx)
-        self.threadpool.start(rxWorker)
+        # Keep a reference to each Worker. A bare local goes out of scope after
+        # setupUi returns and can be garbage-collected while its thread is still
+        # running - the CAL worker in particular crashed with "WorkerSignals has
+        # been deleted" when Python collected it mid-run, which then cascaded
+        # into the threads touching deleted widgets. Pin them all to self.
+        self.rxWorker = Worker(self.connRx)
+        self.threadpool.start(self.rxWorker)
 
-        txWorker = Worker(self.connTx)
-        self.threadpool.start(txWorker)
+        self.txWorker = Worker(self.connTx)
+        self.threadpool.start(self.txWorker)
 
-        pttWorker = Worker(self.connPtt)
-        self.threadpool.start(pttWorker)
+        self.pttWorker = Worker(self.connPtt)
+        self.threadpool.start(self.pttWorker)
 
     def retranslateUi(self, MainWindow):
         _translate = QCoreApplication.translate
@@ -595,10 +600,10 @@ class Ui_MainWindow(object):
         centre = self.beaconBaseHz if self.beaconBaseHz else self.beaconTrueHz
         self.statusBar.showMessage("Measuring %.6f MHz beacon..." % (centre / 1e6))
         self.requestRxTune(centre - self.calPlaceHz) # USB: dial below the beacon
-        w = Worker(self.runCalibrate, savedRx)
-        w.signals.result.connect(self.calFinished)
-        w.signals.error.connect(self.calFailed)
-        self.threadpool.start(w)
+        self.calWorker = Worker(self.runCalibrate, savedRx)
+        self.calWorker.signals.result.connect(self.calFinished)
+        self.calWorker.signals.error.connect(self.calFailed)
+        self.threadpool.start(self.calWorker)
 
     def runCalibrate(self, savedRx):
         try:
