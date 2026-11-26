@@ -167,7 +167,7 @@ class Ui_MainWindow(object):
                                # changed - gqrx ppm, an LNB swap, or a fresh hand
                                # alignment - and the stored guess needs re-seeding
                                # rather than a confident wrong answer.
-    calMinDrift = 100          # below this the beacon hasn't verifiably moved: an
+    calMinDrift = 40          # below this the beacon hasn't verifiably moved: an
                                # FSK beacon is only measurable to a few tens of Hz,
                                # and calling that "drift" moves the transmitter on
                                # noise. Below the floor, CAL reports stable and
