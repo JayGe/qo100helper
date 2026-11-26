@@ -764,7 +764,7 @@ class Ui_MainWindow(object):
                     self.syncRxReq = 0
                 else:
                     connSock.send('f\n'.encode())
-                output = connSock.recv(100).decode()
+                output = connSock.recv(100).decode().strip()
                 if output == '':
                     # gqrx closed the connection. It serves ONE remote client, so
                     # a second helper or a probe taking the slot shows up here as
@@ -871,7 +871,7 @@ class Ui_MainWindow(object):
                         connSock.send('f\n'.encode())
                 else:
                     connSock.send('f\n'.encode())
-                output = connSock.recv(100).decode()
+                output = connSock.recv(100).decode().strip()
                 
                 if not ( re.match(r'^[0-9]+$', str(output)) ):
                     #print ("Unexpected non frequency response from hamlib: " + str(output))
