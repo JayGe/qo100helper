@@ -325,6 +325,7 @@ class Ui_MainWindow(object):
         QMetaObject.connectSlotsByName(MainWindow)
 
         self.threadpool = QThreadPool()
+        self.running = True     # worker loops exit when this clears on shutdown
 
         self.loadCalConf()      # pick up the last CAL before the rigs start talking
         self.txrxOffset = self.desiredOffset()
@@ -723,7 +724,7 @@ class Ui_MainWindow(object):
         # to call os._exit(1). That killed the whole helper silently, stopping
         # PTT and amp supervision mid-session and leaving the transmitter
         # stranded wherever it last pointed. Retry instead.
-        while 1:
+        while self.running:
             try:
                 self.connRxOnce()
             except:
@@ -740,7 +741,7 @@ class Ui_MainWindow(object):
             if self.rxLinkDown:
                 self.rxLinkDown = False
                 self.statusBar.showMessage("Receiver link restored")
-            while 1:
+            while self.running:
                 time.sleep(0.1)
                 if (self.calTuneReq): # CAL wants the receiver somewhere specific
                     connSock.send(('F %s\n' % self.calTuneFreq).encode())
@@ -796,7 +797,7 @@ class Ui_MainWindow(object):
         # or the amp could stay keyed with nobody watching. Forcing txFreq to an
         # impossible value makes the chase re-send the wanted frequency as soon
         # as the link is back, rather than trusting a pre-outage reading.
-        while 1:
+        while self.running:
             try:
                 self.connTxOnce()
             except:
@@ -814,7 +815,7 @@ class Ui_MainWindow(object):
             if self.txLinkDown:
                 self.txLinkDown = False
                 self.statusBar.showMessage("Transmitter link restored")
-            while 1:
+            while self.running:
                 time.sleep(0.1)
                 wantOffset = self.desiredOffset() # nominal + CAL trim - slider
                 if (wantOffset != self.txrxOffset): # Adjust TX offset if changed in GUI or by CAL
@@ -895,7 +896,7 @@ class Ui_MainWindow(object):
         # Same retry policy as connRx/connTx. This one matters most: if the
         # thread dies, "Amp On TX" silently stops keying the amp in step with
         # the rig and nothing anywhere says so.
-        while 1:
+        while self.running:
             try:
                 self.connPttOnce()
             except:
@@ -914,7 +915,7 @@ class Ui_MainWindow(object):
                 self.pttLinkDown = False
                 self.statusBar.showMessage("Amp keying link restored")
             last = None
-            while 1:
+            while self.running:
                 time.sleep(0.2)
                 if not self.ampAction.isChecked():
                     last = None
@@ -935,11 +936,35 @@ class Ui_MainWindow(object):
             raise
 
 
+    def shutdown(self):
+        # Window closed: stop the worker loops and drop TX/amp/unmute so the
+        # process exits and nothing is left keyed mid-transmit.
+        self.running = False
+        try:
+            s = socket(AF_INET, SOCK_STREAM)
+            s.settimeout(1.0)
+            s.connect((self.txHost, self.txPort))
+            s.send('T 0\n'.encode())
+            try:
+                s.recv(100)
+            except:
+                pass
+            s.close()
+        except:
+            pass
+        os.system("(/usr/bin/mosquitto_pub -h 192.168.0.201 -t '/radio/amp/set2' -m 'OFF')")
+        try:
+            self.pulse.mute(self.pulse.sink_list()[self.pulseDev], False)
+        except:
+            pass
+
+
 if __name__ == "__main__":
     import sys
     app = QApplication(sys.argv)
     MainWindow = QMainWindow()
     ui = Ui_MainWindow()
     ui.setupUi(MainWindow)
+    app.aboutToQuit.connect(ui.shutdown)
     MainWindow.show()
     sys.exit(app.exec_())
